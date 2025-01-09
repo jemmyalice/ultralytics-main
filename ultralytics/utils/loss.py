@@ -88,18 +88,45 @@ class DFLoss(nn.Module):
         ).mean(-1, keepdim=True)
 
 
+# class BboxLoss(nn.Module):
+#     """Criterion class for computing training losses during training."""
+#
+#     def __init__(self, reg_max=16):
+#         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
+#         super().__init__()
+#         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+#
+#     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+#         """IoU loss."""
+#         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+#         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+#         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+#
+#         # DFL loss
+#         if self.dfl_loss:
+#             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
+#             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+#             loss_dfl = loss_dfl.sum() / target_scores_sum
+#         else:
+#             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
+#
+#         return loss_iou, loss_dfl
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
-    def __init__(self, reg_max=16):
+    def __init__(self, reg_max=16,mpdiou=False):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        self.mpdiou = mpdiou
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        if self.mpdiou:
+            iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, MPDIoU=True)
+        else:
+            iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
@@ -154,9 +181,30 @@ class KeypointLoss(nn.Module):
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
 
+# class v8DetectionLoss:
+#     """Criterion class for computing training losses."""
+#
+#     def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+#         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
+#         device = next(model.parameters()).device  # get model device
+#         h = model.args  # hyperparameters
+#
+#         m = model.model[-1]  # Detect() module
+#         self.bce = nn.BCEWithLogitsLoss(reduction="none")
+#         self.hyp = h
+#         self.stride = m.stride  # model strides
+#         self.nc = m.nc  # number of classes
+#         self.no = m.nc + m.reg_max * 4
+#         self.reg_max = m.reg_max
+#         self.device = device
+#
+#         self.use_dfl = m.reg_max > 1
+#
+#         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+#         self.bbox_loss = BboxLoss(m.reg_max).to(device)
+#         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
-
     def __init__(self, model, tal_topk=10):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
@@ -173,8 +221,10 @@ class v8DetectionLoss:
 
         self.use_dfl = m.reg_max > 1
 
+        self.mpdiou = self.hyp.mpdiou
+
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, mpdiou=self.mpdiou).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
@@ -221,7 +271,15 @@ class v8DetectionLoss:
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
-        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        # if "rgb" in batch:
+        #     targets = torch.cat((
+        #     batch["rgb"]["batch_idx"].view(-1, 1), batch["rgb"]["cls"].view(-1, 1), batch["rgb"]["bboxes"]), 1)
+        if "ir" in batch:
+            targets = torch.cat((
+            batch["ir"]["batch_idx"].view(-1, 1), batch["ir"]["cls"].view(-1, 1), batch["ir"]["bboxes"]), 1)
+        else:
+            targets = torch.cat((
+                batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
