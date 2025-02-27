@@ -6,7 +6,7 @@ from ultralytics import YOLO
 warnings.filterwarnings('ignore')
 
 if __name__=='__main__':
-    model = YOLO(r'F:\pytroch\ultralytics-main\ultralytics\cfg\models\11\yolo11.yaml')
+    model = YOLO(r'F:\pytroch\ultralytics-main\ultralytics\cfg\models\11\yolo11s.yaml')
 
     model.train(data=r"F:\pytroch\ultralytics-main\data\data.yaml",
         cache=False,
